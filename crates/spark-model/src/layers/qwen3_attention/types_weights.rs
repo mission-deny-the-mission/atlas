@@ -5,7 +5,7 @@
 
 use spark_runtime::gpu::DevicePtr;
 
-use crate::weight_map::{DenseWeight, QuantizedWeight};
+use crate::weight_map::{DenseWeight, Glm5IndexerWeights, QuantizedWeight};
 
 /// MLA (Multi-head Latent Attention) weight components for 2-step decode.
 ///
@@ -13,6 +13,9 @@ use crate::weight_map::{DenseWeight, QuantizedWeight};
 /// MLA does: `input × wq_a → latent[q_lora]` → `norm` → `latent × wq_b → Q`.
 /// This preserves the latent normalization that's critical for output quality.
 pub struct MlaWeights {
+    /// GLM-5.3 DSA semantic IndexPool projections. `None` keeps the regular
+    /// dense MLA path exactly unchanged for every existing model.
+    pub glm_indexer: Option<Glm5IndexerWeights>,
     pub wq_a: DenseWeight, // [q_lora, h] — Q down-projection (BF16)
     pub wq_a_nvfp4: Option<QuantizedWeight>, // NVFP4 for fast decode
     /// Native block-scaled FP8 weight (the checkpoint ships these projections as
@@ -175,4 +178,7 @@ pub struct HcWeights {
     pub hc_mult: usize,
     pub sinkhorn_iters: usize,
     pub hc_eps: f32,
+    /// GLM-5.3-Flash collapses the final highway with a plain mean. DeepSeek
+    /// V4 keeps this false and uses its learned `head` instead.
+    pub final_mean: bool,
 }

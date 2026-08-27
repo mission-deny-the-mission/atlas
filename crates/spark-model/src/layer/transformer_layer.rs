@@ -370,6 +370,17 @@ pub trait TransformerLayer: Send + Sync {
         false
     }
 
+    /// Whether this recurrent layer implements Atlas's Qwen Gated Delta Net
+    /// (GDN) three-phase prefill pipeline.
+    ///
+    /// Recurrent layers still report [`Self::is_ssm_layer`] for state-pool and
+    /// snapshot ownership. Architectures with a different recurrence must use
+    /// the regular, sequential `prefill` hook until they provide their own
+    /// staged prefill implementation.
+    fn uses_gdn_prefill_pipeline(&self) -> bool {
+        false
+    }
+
     /// Allocate the transposed MoE expert weights used by the coalesced
     /// prefill GEMM kernels. Called as a post-load pass from `factory::build`
     /// after LM-head NVFP4 quantization has freed BF16 headroom, so

@@ -42,6 +42,10 @@ impl Qwen3AttentionLayer {
         self.mla = Some(mla);
     }
 
+    pub fn set_physical_layer_idx(&mut self, idx: usize) {
+        self.physical_layer_idx = idx;
+    }
+
     /// Set per-block Manifold-Constrained Hyper-Connection weights
     /// (DeepSeek-V4). When set, the attn/ffn residual sites route through
     /// `hc_pre`/`hc_post` against the model-level `hc_streams` buffer.

@@ -565,7 +565,7 @@ impl TransformerModel {
             let mut seqs_vec: Vec<&mut SequenceState> =
                 streams.iter_mut().map(|s| &mut *s.seq).collect();
 
-            if layer.is_ssm_layer() {
+            if layer.uses_gdn_prefill_pipeline() {
                 let proc_starts: Vec<usize> = per_stream.iter().map(|m| m.proc_start).collect();
                 self.prefill_ssm_batched_layer(
                     layer.as_ref(),
@@ -578,6 +578,20 @@ impl TransformerModel {
                     &meta,
                     &gdn_bufs,
                     h_state_ptrs_off,
+                    &ctx,
+                    stream,
+                )?;
+            } else if layer.is_ssm_layer() {
+                let proc_starts: Vec<usize> = per_stream.iter().map(|m| m.proc_start).collect();
+                self.prefill_recurrent_batched_layer(
+                    layer.as_ref(),
+                    layer_idx,
+                    hidden_base,
+                    _residual_base,
+                    &mut seqs_vec,
+                    &mut kv_cache,
+                    &proc_starts,
+                    &meta,
                     &ctx,
                     stream,
                 )?;

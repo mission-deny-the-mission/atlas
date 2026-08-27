@@ -13,6 +13,8 @@ mod expert;
 mod fp8_dequant;
 #[path = "weight_map/fp8_lut.rs"]
 mod fp8_lut;
+#[path = "weight_map/glm5_next.rs"]
+mod glm5_next;
 #[path = "weight_map/loaders_fp8.rs"]
 mod loaders_fp8;
 #[path = "weight_map/loaders_moe.rs"]
@@ -46,6 +48,7 @@ mod tests;
 
 pub use expert::*;
 pub(crate) use fp8_dequant::*;
+pub use glm5_next::*;
 pub use loaders_fp8::*;
 pub use loaders_mtp::*;
 pub use model_a::*;

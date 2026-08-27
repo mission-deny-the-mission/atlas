@@ -1,0 +1,66 @@
+[model]
+name = "glm-5.3-flash"
+hf_id = "zai-org/GLM-5.3-Flash"
+architecture = "Kimi Delta Attention + DeepSeek Sparse MLA + MoE + mHC + vision"
+
+layers_total = 45
+layers_linear_attention = 34
+layers_full_attention = 11
+layer_pattern = "KDA, KDA, KDA, DSA"
+
+hidden_dim = 4096
+head_dim = 256
+q_heads = 64
+kv_heads = 64
+vocab_size = 154880
+max_position_embeddings = 1048576
+
+linear_attn_key_heads = 64
+linear_attn_key_dim = 128
+linear_attn_value_heads = 64
+linear_attn_value_dim = 128
+linear_conv_kernel = 4
+
+moe_experts = 288
+moe_topk = 8
+moe_intermediate = 2048
+shared_expert_intermediate = 2048
+
+hc_mult = 4
+hc_sinkhorn_iters = 20
+hc_eps = 1e-6
+
+[[model_types]]
+model_type = "glm5_next"
+hidden_size = 4096
+
+[sampling.thinking_text]
+temperature = 1.0
+top_p = 0.95
+top_k = 0
+presence_penalty = 0.0
+
+[sampling.thinking_coding]
+temperature = 1.0
+top_p = 0.95
+top_k = 0
+presence_penalty = 0.0
+
+[sampling.non_thinking]
+temperature = 1.0
+top_p = 0.95
+top_k = 0
+presence_penalty = 0.0
+
+[sampling.tools]
+temperature = 1.0
+top_p = 0.95
+top_k = 0
+presence_penalty = 0.0
+
+[behavior]
+thinking_default = true
+thinking_in_tools = true
+tool_call_parser = "poolside_v1"
+default_kv_dtype = "bf16"
+default_num_drafts = 0

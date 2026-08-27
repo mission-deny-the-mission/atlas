@@ -456,6 +456,7 @@ pub fn assemble_layer(
     let wkv_a_fp8 = load_fp8_mla("wkv");
 
     let mla = MlaWeights {
+        glm_indexer: None,
         wq_a,
         wq_a_nvfp4,
         wq_a_fp8,
@@ -550,6 +551,7 @@ pub fn assemble_layer(
             hc_mult: config.hc_mult,
             sinkhorn_iters: config.hc_sinkhorn_iters,
             hc_eps: config.hc_eps,
+            final_mean: false,
         });
     }
 

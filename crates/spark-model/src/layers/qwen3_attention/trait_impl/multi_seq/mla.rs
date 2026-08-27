@@ -41,7 +41,7 @@
 //! that scratch. N ≤ 8, the chain is GEMV-bound, so the per-seq launch
 //! overhead is negligible.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use spark_runtime::gpu::DevicePtr;
 use spark_runtime::kv_cache::PagedKvCache;
 
@@ -237,6 +237,9 @@ impl Qwen3AttentionLayer {
         d: MlaDims,
         stream: u64,
     ) -> Result<()> {
+        if mla.rope == 0 {
+            bail!("batched MLA decode without RoPE is not implemented");
+        }
         let gpu = c.fwd.gpu;
         let buffers = c.fwd.buffers;
 

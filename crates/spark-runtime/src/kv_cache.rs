@@ -411,6 +411,14 @@ struct LayerPool {
     v_block_stride: usize,
     /// Effective dtype for this layer.
     dtype: KvCacheDtype,
+    /// Optional GLM IndexPool sidecar storage, aligned to the KV block table.
+    pub(crate) index_raw_pool: Option<DevicePtr>,
+    pub(crate) index_pool: Option<DevicePtr>,
+    pub(crate) index_gate_pool: Option<DevicePtr>,
+    pub(crate) index_raw_block_stride: usize,
+    pub(crate) index_block_stride: usize,
+    pub(crate) index_gate_block_stride: usize,
+    pub(crate) index_pool_slots: usize,
 }
 
 /// Paged KV cache across all attention layers.
@@ -444,6 +452,20 @@ impl atlas_core::scope::ModelResource<dyn crate::gpu::GpuBackend> for PagedKvCac
         let mut first_error = None;
         for layer in self.layers.drain(..) {
             for ptr in [layer.k_pool, layer.v_pool] {
+                if let Err(e) = gpu.free(ptr)
+                    && first_error.is_none()
+                {
+                    first_error = Some(e);
+                }
+            }
+            for ptr in [
+                layer.index_raw_pool,
+                layer.index_pool,
+                layer.index_gate_pool,
+            ]
+            .into_iter()
+            .flatten()
+            {
                 if let Err(e) = gpu.free(ptr)
                     && first_error.is_none()
                 {

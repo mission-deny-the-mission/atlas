@@ -1,0 +1,19 @@
+[build]
+extra_nvcc_flags = ["--fmad=false"]
+
+[modules]
+kda = "kda"
+hyper_connection = "hyper_connection"
+index_pool = "index_pool"
+index_select = "index_select"
+index_select_weighted = "index_select_weighted"
+index_expand = "index_expand"
+selected_mla = "selected_mla"
+index_write = "index_write"
+
+# This target intentionally shadows only the plain activation entry point to
+# apply GLM's SwiGLU limit. The common fused FP8 quantizing entry point is not
+# required by the GLM BF16 KDA/MLA bring-up and must not be implied by the
+# shadow.
+[shadow_exempt]
+moe_silu_mul = ["silu_mul_quant_fp8"]

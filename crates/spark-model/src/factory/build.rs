@@ -3,14 +3,15 @@
 //! `build_model` — entry point that wires up the configured loader,
 //! buffers, KV cache, and (optional) DFlash drafter into a `TransformerModel`.
 
-use anyhow::Result;
-use atlas_core::config::ModelConfig;
+use anyhow::{Result, ensure};
+use atlas_core::config::{LayerType, ModelConfig};
 use spark_runtime::buffers::BufferArena;
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::{KvCacheConfig, KvCacheDtype, PagedKvCache};
 use spark_runtime::prefix_cache::PrefixCache;
 use spark_runtime::weights::WeightStore;
 
+use super::glm5_next_capabilities::ensure_supported_speculation;
 use super::loader_for_config;
 use super::m2_setup::maybe_run_minimax_m2_moe_transpose;
 use super::{DflashBuildArgs, LoraBuildArgs};
@@ -99,6 +100,7 @@ pub fn build_model(
 
     // ── Step 1: Select weight loader (only model-specific dispatch) ──
     let loader = loader_for_config(&config)?;
+    ensure_supported_speculation(&config, use_speculative)?;
 
     // ── LoRA adapter load (pre-arena, pre-KV-sizing) ──
     // MUST run before `BufferArena::new` and the `gpu.free_memory()`
@@ -527,7 +529,27 @@ pub fn build_model(
             );
         }
     }
-    let kv_cache = PagedKvCache::new(kv_config, num_kv_blocks, gpu.as_ref())?;
+    let high_speed_swap = kv_config.cache_blocks_per_seq.is_some();
+    let mut kv_cache = PagedKvCache::new(kv_config, num_kv_blocks, gpu.as_ref())?;
+    if config.model_type == "glm5_next" {
+        ensure!(
+            !high_speed_swap,
+            "GLM-5.3-Flash IndexPool does not support high-speed KV swap yet"
+        );
+        let mut attn_idx = 0usize;
+        for layer_idx in 0..config.num_hidden_layers {
+            if config.layer_type(layer_idx) == LayerType::FullAttention {
+                kv_cache.enable_index_pool(
+                    attn_idx,
+                    config.index_head_dim,
+                    config.index_n_heads,
+                    config.index_kpool,
+                    gpu.as_ref(),
+                )?;
+                attn_idx += 1;
+            }
+        }
+    }
 
     // ── Step 6: Assemble model ──
     // Capture pointers for any post-construction sharing (DFlash drafter

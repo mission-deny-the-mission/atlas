@@ -27,6 +27,9 @@ pub struct Qwen3AttentionLayer {
     pub(super) post_attn_norm: DenseWeight,
     pub(super) ffn: FfnComponent,
     pub(super) attn_layer_idx: usize,
+    /// Physical transformer block index, distinct from compact KV-cache index
+    /// used by sparse-attention layers.
+    pub(crate) physical_layer_idx: usize,
     /// Startup-static LoRA adapter overlay for the K/V/O projections (v0;
     /// q_proj excluded — gated Q+gate interleave). Installed
     /// post-construction via `set_lora_weights`; `None` = base-only.
@@ -111,6 +114,8 @@ pub struct Qwen3AttentionLayer {
     pub(super) hc_expand_k: KernelHandle,
     /// HC `hc_head` kernel handle (NULL when HC disabled).
     pub(super) hc_head_k: KernelHandle,
+    /// GLM final unweighted highway mean (NULL when HC disabled).
+    pub(super) hc_mean_k: KernelHandle,
     // ── Transposed weights for prefill GEMM ──
     /// Fused [q|k|v] transposed twin (N = q_proj_dim + 2*kv_dim). Present only
     /// when the three projections share one `weight_scale_2` — the GEMM applies
@@ -233,6 +238,12 @@ pub struct Qwen3AttentionLayer {
     pub(super) mla_q_rope_scatter_k: KernelHandle,
     pub(super) mla_q_rope_writeback_k: KernelHandle,
     pub(super) mla_cache_assemble_k: KernelHandle,
+    /// GLM-5.3 sparse-DSA IndexPool kernels. All are null for non-GLM models.
+    pub(super) glm_index_norm_k: KernelHandle,
+    pub(super) glm_index_write_k: KernelHandle,
+    pub(super) glm_index_select_k: KernelHandle,
+    pub(super) glm_index_expand_k: KernelHandle,
+    pub(super) glm_selected_mla_k: KernelHandle,
     /// MLA fused kernels — prefill.
     pub(super) mla_q_rope_extract_batched_k: KernelHandle,
     pub(super) mla_q_rope_writeback_batched_k: KernelHandle,

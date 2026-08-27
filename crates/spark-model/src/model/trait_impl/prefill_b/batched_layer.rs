@@ -315,4 +315,48 @@ impl TransformerModel {
             stream,
         )
     }
+
+    /// Run a recurrent layer that does not implement the Qwen GDN staged
+    /// prefill contract. Each sequence retains its own recurrent state; the
+    /// stacked hidden layout is only an arena packing convention here.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::model) fn prefill_recurrent_batched_layer(
+        &self,
+        layer: &dyn TransformerLayer,
+        layer_idx: usize,
+        hidden_stacked: DevicePtr,
+        residual_stacked: DevicePtr,
+        seqs: &mut [&mut SequenceState],
+        kv_cache: &mut PagedKvCache,
+        seqs_proc_start: &[usize],
+        meta: &BatchedAttnMetadata,
+        ctx: &ForwardContext,
+        stream: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            seqs.len() == seqs_proc_start.len(),
+            "recurrent batched prefill sequence metadata mismatch"
+        );
+        let row_bytes = ctx.config.hidden_size * std::mem::size_of::<u16>();
+        for (stream_idx, seq) in seqs.iter_mut().enumerate() {
+            let first = meta.cu_seqlens_host[stream_idx] as usize;
+            let last = meta.cu_seqlens_host[stream_idx + 1] as usize;
+            let len = last - first;
+            layer.prefill(
+                hidden_stacked.offset(first * row_bytes),
+                residual_stacked.offset(first * row_bytes),
+                len,
+                seq.layer_states[layer_idx].as_mut(),
+                kv_cache,
+                seqs_proc_start[stream_idx],
+                &mut seq.block_table,
+                &mut seq.disk_block_ids,
+                &mut seq.disk_last_offloaded_per_layer,
+                0,
+                ctx,
+                stream,
+            )?;
+        }
+        Ok(())
+    }
 }

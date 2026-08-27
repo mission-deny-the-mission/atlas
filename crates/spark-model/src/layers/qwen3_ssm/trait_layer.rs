@@ -160,6 +160,10 @@ impl TransformerLayer for Qwen3SsmLayer {
         self.is_ssm_layer_inner()
     }
 
+    fn uses_gdn_prefill_pipeline(&self) -> bool {
+        true
+    }
+
     fn prefill_phase1(
         &self,
         hidden: DevicePtr,

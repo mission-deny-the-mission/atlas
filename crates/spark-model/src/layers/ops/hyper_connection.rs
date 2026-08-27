@@ -134,3 +134,24 @@ pub fn hc_head(
         .arg_f32(hc_eps)
         .launch(stream)
 }
+
+/// Final GLM hyper-connection collapse: an unweighted mean over streams.
+pub fn hc_mean(
+    gpu: &dyn GpuBackend,
+    kernel: KernelHandle,
+    streams: DevicePtr,
+    y_out: DevicePtr,
+    num_tokens: u32,
+    hidden_size: u32,
+    hc_mult: u32,
+    stream: u64,
+) -> Result<()> {
+    KernelLaunch::new(gpu, kernel)
+        .grid([num_tokens, 1, 1])
+        .block([256, 1, 1])
+        .arg_ptr(streams)
+        .arg_ptr(y_out)
+        .arg_u32(hidden_size)
+        .arg_u32(hc_mult)
+        .launch(stream)
+}

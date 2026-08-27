@@ -66,6 +66,18 @@ mod gemv_q2_vec;
 mod gemv_sw;
 #[path = "ops/hyper_connection.rs"]
 mod hyper_connection;
+#[path = "ops/index_expand.rs"]
+mod index_expand;
+#[path = "ops/index_pool.rs"]
+mod index_pool;
+#[path = "ops/index_select.rs"]
+mod index_select;
+#[path = "ops/index_select_weighted.rs"]
+mod index_select_weighted;
+#[path = "ops/index_write.rs"]
+mod index_write;
+#[path = "ops/kda.rs"]
+mod kda;
 #[path = "ops/kv_cache.rs"]
 mod kv_cache;
 #[path = "ops/kv_cache_fp8k.rs"]
@@ -119,6 +131,8 @@ mod q4k_mmq;
 mod quant_dispatch;
 #[path = "ops/sampling.rs"]
 mod sampling;
+#[path = "ops/selected_mla.rs"]
+mod selected_mla;
 #[path = "ops/ssm_gdn_a.rs"]
 mod ssm_gdn_a;
 #[path = "ops/ssm_gdn_a2.rs"]
@@ -161,6 +175,12 @@ pub use gemv_q2::*;
 pub use gemv_q2_vec::*;
 pub use gemv_sw::*;
 pub use hyper_connection::*;
+pub use index_expand::*;
+pub use index_pool::*;
+pub use index_select::*;
+pub use index_select_weighted::*;
+pub use index_write::*;
+pub use kda::*;
 pub use kv_cache::*;
 pub use kv_cache_fp8k::*;
 pub use kv_cache_turbok::*;
@@ -189,6 +209,7 @@ pub use q2_0_mmq::*;
 pub use q4k_mmq::*;
 pub use quant_dispatch::*;
 pub use sampling::*;
+pub use selected_mla::*;
 pub use ssm_gdn_a::*;
 pub use ssm_gdn_a2::*;
 pub use ssm_gdn_a3::*;

@@ -431,14 +431,14 @@ impl Qwen3AttentionLayer {
         let eps = ctx.config.rms_norm_eps as f32;
         let hc = self.hc.as_ref().unwrap();
         let hc_mult = hc.hc_mult as u32;
-        let is_first_layer = self.attn_layer_idx == 0;
-        let is_last_layer = self.attn_layer_idx + 1 == ctx.config.num_hidden_layers;
+        let is_first_layer = self.physical_layer_idx == 0;
+        let is_last_layer = self.physical_layer_idx + 1 == ctx.config.num_hidden_layers;
         let hc_streams = ctx.buffers.hc_streams();
         let post = ctx.buffers.hc_post();
         let comb = ctx.buffers.hc_comb();
         let diag_all =
             std::env::var("ATLAS_DIAG_V4_ALL_LAYERS").is_ok_and(|v| v == "1" || v == "true");
-        let diag_this = self.attn_layer_idx == 0 || diag_all;
+        let diag_this = self.physical_layer_idx == 0 || diag_all;
 
         // 1. Expand single-stream embedding into hc_mult copies on first layer.
         if is_first_layer {
@@ -571,6 +571,17 @@ impl Qwen3AttentionLayer {
                     hc_mult,
                     eps,
                     hc.hc_eps,
+                    stream,
+                )?;
+            } else if is_last_layer && hc.final_mean {
+                ops::hc_mean(
+                    ctx.gpu,
+                    self.hc_mean_k,
+                    hc_streams,
+                    hidden,
+                    1,
+                    h as u32,
+                    hc_mult,
                     stream,
                 )?;
             }
@@ -742,6 +753,17 @@ impl Qwen3AttentionLayer {
                     &format!("V4-decode L{} hc_head", self.attn_layer_idx),
                 );
             }
+        } else if is_last_layer && hc.final_mean {
+            ops::hc_mean(
+                ctx.gpu,
+                self.hc_mean_k,
+                hc_streams,
+                hidden,
+                1,
+                h as u32,
+                hc_mult,
+                stream,
+            )?;
         } else if is_last_layer {
             tracing::warn!(
                 "V4-decode L{}: hc_head SKIPPED (no head weights)",

@@ -101,6 +101,7 @@ impl Qwen3AttentionLayer {
         // family the model does not have is never LOOKED UP, so it leaves no
         // failed row in the boot audit. See `init_arch_gates`.
         let probes = ArchProbes::from_config(config);
+        let glm_index_pool = config.model_type == "glm5_next";
         let mrope_interleaved = config.mrope_interleaved;
         Ok(Self {
             input_norm,
@@ -108,6 +109,7 @@ impl Qwen3AttentionLayer {
             post_attn_norm,
             ffn,
             attn_layer_idx,
+            physical_layer_idx: attn_layer_idx,
             lora: None,
             gated,
             mrope_interleaved,
@@ -165,6 +167,7 @@ impl Qwen3AttentionLayer {
                 "hc_expand",
             ),
             hc_head_k: gate(probes.hyper_connection, gpu, "hyper_connection", "hc_head"),
+            hc_mean_k: gate(probes.hyper_connection, gpu, "hyper_connection", "hc_mean"),
             qkv_nvfp4_t: None,
             q_nvfp4_t: None,
             k_nvfp4_t: None,
@@ -350,6 +353,26 @@ impl Qwen3AttentionLayer {
             mla_q_rope_scatter_k: gate(probes.mla, gpu, "mla_absorbed", "mla_q_rope_scatter"),
             mla_q_rope_writeback_k: gate(probes.mla, gpu, "mla_absorbed", "mla_q_rope_writeback"),
             mla_cache_assemble_k: gate(probes.mla, gpu, "mla_absorbed", "mla_cache_assemble"),
+            glm_index_norm_k: gate(
+                glm_index_pool,
+                gpu,
+                "index_write",
+                "glm_index_key_layer_norm",
+            ),
+            glm_index_write_k: gate(
+                glm_index_pool,
+                gpu,
+                "index_write",
+                "glm_index_pool_write_raw",
+            ),
+            glm_index_select_k: gate(
+                glm_index_pool,
+                gpu,
+                "index_select_weighted",
+                "glm_index_pool_select_weighted",
+            ),
+            glm_index_expand_k: gate(glm_index_pool, gpu, "index_expand", "glm_index_pool_expand"),
+            glm_selected_mla_k: gate(glm_index_pool, gpu, "selected_mla", "glm_selected_mla_bf16"),
             mla_q_rope_extract_batched_k: gate(
                 probes.mla,
                 gpu,

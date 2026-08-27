@@ -169,12 +169,14 @@ extern "C" __global__ void hc_pre(
         // Sinkhorn was A/B-tested (portv4b11) and REGRESSED coherence onset
         // (~150→~90 tok) — the extra projection compensates for another mHC
         // deviation, so it stays. eps-Sinkhorn is NOT the ~150 base-degrade lever.
+#ifndef HC_REFERENCE_SINKHORN
         for (unsigned int j = 0; j < hc; ++j) {
             float c = 0.f;
             for (unsigned int i = 0; i < hc; ++i) c += comb[i * hc + j];
             float inv = (c > 0.f) ? (1.f / c) : 0.f;
             for (unsigned int i = 0; i < hc; ++i) comb[i * hc + j] *= inv;
         }
+#endif
         for (unsigned int i = 0; i < hc; ++i)
             for (unsigned int j = 0; j < hc; ++j)
                 comb_out[(size_t)t * hc * hc + i * hc + j] = comb[i * hc + j];

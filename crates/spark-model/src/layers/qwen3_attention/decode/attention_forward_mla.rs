@@ -46,7 +46,7 @@ impl Qwen3AttentionLayer {
     ) -> Result<DevicePtr> {
         let DecodeMlaArgs {
             normed,
-            q_out: _,
+            q_out,
             k_out,
             v_out,
             q_dim,
@@ -56,12 +56,13 @@ impl Qwen3AttentionLayer {
             eps,
             bs,
             stream,
-            pos: _,
+            pos,
         } = *args;
         let mla = self
             .mla
             .as_ref()
             .expect("attention_forward_mla called without MLA config");
+        let glm_indexer = mla.glm_indexer.as_ref();
         let meta = ctx
             .attn_metadata
             .expect("MLA decode requires pre-uploaded metadata");
@@ -234,6 +235,34 @@ impl Qwen3AttentionLayer {
             }
         })?;
 
+        // GLM DSA IndexPool query projections use the post-QA-norm latent and
+        // the same normalized layer input as MLA. GLM-5.3 has no RoPE, so the
+        // regular Q buffer is dead after absorption and can stage this query.
+        if let Some(indexer) = glm_indexer {
+            prof!("glm_index_query", {
+                ops::dense_gemv(
+                    ctx.gpu,
+                    self.dense_gemv_k,
+                    q_latent,
+                    &indexer.wq_b,
+                    q_full,
+                    (ctx.config.index_n_heads * ctx.config.index_head_dim) as u32,
+                    q_lora,
+                    stream,
+                )?;
+                ops::dense_gemv(
+                    ctx.gpu,
+                    self.dense_gemv_k,
+                    normed,
+                    &indexer.weights_proj,
+                    q_full.offset(ctx.config.index_n_heads * ctx.config.index_head_dim * 2),
+                    ctx.config.index_n_heads as u32,
+                    h,
+                    stream,
+                )
+            })?;
+        }
+
         // Step 3: KV latent → norm
         let kv_latent = ctx.buffers.expert_gate_out();
         prof!("wkv_a+norm", {
@@ -276,50 +305,54 @@ impl Qwen3AttentionLayer {
         // Step 4: K_rope + RoPE + writeback
         let k_rope_single = ctx.buffers.ssm_ba();
         prof!("k_rope+RoPE+wb", {
-            ops::dense_gemv(
-                ctx.gpu,
-                self.dense_gemv_k,
-                normed,
-                &mla.wkv_a_rope,
-                k_rope_single,
-                mla_rope,
-                h,
-                stream,
-            )?;
-            ops::rope_yarn(
-                ctx.gpu,
-                self.rope_yarn_k,
-                q_rope_direct,
-                k_rope_single,
-                meta.positions,
-                1,
-                nq,
-                1,
-                mla_rope,
-                mla_rope,
-                mla.yarn_inv_freq,
-                ctx.config.rope_theta as f32,
-                stream,
-            )?;
-            if self.mla_q_rope_writeback_k.0 != 0 {
-                ops::mla_q_rope_writeback(
+            if mla_rope > 0 {
+                ops::dense_gemv(
                     ctx.gpu,
-                    self.mla_q_rope_writeback_k,
-                    q_rope_direct,
-                    q_absorbed_buf,
-                    nq,
+                    self.dense_gemv_k,
+                    normed,
+                    &mla.wkv_a_rope,
+                    k_rope_single,
                     mla_rope,
-                    kv_lora,
-                    mla_cache_dim,
+                    h,
                     stream,
-                )
-            } else {
-                for head_idx in 0..nq as usize {
-                    let src = q_rope_direct.offset(head_idx * mla.rope * 2);
-                    let dst = q_absorbed_buf
-                        .offset((head_idx * mla_cache_dim as usize + mla.kv_lora_rank) * 2);
-                    ctx.gpu.copy_d2d_async(src, dst, mla.rope * 2, stream)?;
+                )?;
+                ops::rope_yarn(
+                    ctx.gpu,
+                    self.rope_yarn_k,
+                    q_rope_direct,
+                    k_rope_single,
+                    meta.positions,
+                    1,
+                    nq,
+                    1,
+                    mla_rope,
+                    mla_rope,
+                    mla.yarn_inv_freq,
+                    ctx.config.rope_theta as f32,
+                    stream,
+                )?;
+                if self.mla_q_rope_writeback_k.0 != 0 {
+                    ops::mla_q_rope_writeback(
+                        ctx.gpu,
+                        self.mla_q_rope_writeback_k,
+                        q_rope_direct,
+                        q_absorbed_buf,
+                        nq,
+                        mla_rope,
+                        kv_lora,
+                        mla_cache_dim,
+                        stream,
+                    )
+                } else {
+                    for head_idx in 0..nq as usize {
+                        let src = q_rope_direct.offset(head_idx * mla.rope * 2);
+                        let dst = q_absorbed_buf
+                            .offset((head_idx * mla_cache_dim as usize + mla.kv_lora_rank) * 2);
+                        ctx.gpu.copy_d2d_async(src, dst, mla.rope * 2, stream)?;
+                    }
+                    Ok(())
                 }
+            } else {
                 Ok(())
             }
         })?;
@@ -376,31 +409,187 @@ impl Qwen3AttentionLayer {
             )
         })?;
 
+        if let Some(indexer) = glm_indexer {
+            let raw_pool = kv_cache
+                .index_raw_pool_ptr(self.attn_layer_idx)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GLM IndexPool sidecar missing for attention layer {}",
+                        self.attn_layer_idx
+                    )
+                })?;
+            let raw_stride = kv_cache
+                .index_raw_block_stride(self.attn_layer_idx)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GLM IndexPool raw stride missing for attention layer {}",
+                        self.attn_layer_idx
+                    )
+                })?;
+            // q_out is unused by absorbed MLA. Use its first two 128-wide rows
+            // as temporary K and per-channel compression-gate outputs.
+            prof!("glm_index_cache", {
+                ops::dense_gemv(
+                    ctx.gpu,
+                    self.dense_gemv_k,
+                    normed,
+                    &indexer.wk,
+                    q_out,
+                    ctx.config.index_head_dim as u32,
+                    h,
+                    stream,
+                )?;
+                ops::index_key_layer_norm(
+                    ctx.gpu,
+                    self.glm_index_norm_k,
+                    q_out,
+                    indexer.k_norm_weight.weight,
+                    indexer.k_norm_bias.weight,
+                    q_out,
+                    ctx.config.index_head_dim as u32,
+                    1.0e-6,
+                    stream,
+                )?;
+                let gate = q_out.offset(ctx.config.index_head_dim * 2);
+                ops::dense_gemv(
+                    ctx.gpu,
+                    self.dense_gemv_k,
+                    normed,
+                    &indexer.kpool_compress_gate,
+                    gate,
+                    ctx.config.index_head_dim as u32,
+                    h,
+                    stream,
+                )?;
+                ops::index_pool_write_raw(
+                    ctx.gpu,
+                    self.glm_index_write_k,
+                    q_out,
+                    gate,
+                    meta.slot,
+                    raw_pool,
+                    1,
+                    ctx.config.index_head_dim as u32,
+                    bs as u32,
+                    u32::try_from(raw_stride)
+                        .map_err(|_| anyhow::anyhow!("GLM IndexPool raw stride exceeds u32"))?,
+                    stream,
+                )
+            })?;
+        }
+
         // Step 8: Paged decode attention
         let attn_out = ctx.buffers.attn_output();
         let inv_sqrt_d = self.effective_attn_scale(hd);
-        prof!("paged_attn", {
-            ops::paged_decode_attn_bf16(
-                ctx.gpu,
-                self.paged_decode_mla_k,
-                q_absorbed_buf,
-                kv_cache.k_pool_ptr(self.attn_layer_idx),
-                kv_cache.v_pool_ptr(self.attn_layer_idx),
-                attn_out,
-                meta.block_table,
-                meta.seq_len,
-                meta.max_blocks_per_seq,
-                1,
-                nq,
-                1,
-                mla_cache_dim,
-                bs as u32,
-                inv_sqrt_d,
-                nq * mla_cache_dim,
-                0,
-                stream,
-            )
-        })?;
+        if let Some(indexer) = glm_indexer {
+            let pos = pos.ok_or_else(|| {
+                anyhow::anyhow!("GLM IndexPool requires a single-sequence decode position")
+            })?;
+            let seq_len = pos.saturating_add(1);
+            let kpool = u32::try_from(ctx.config.index_kpool)
+                .map_err(|_| anyhow::anyhow!("GLM IndexPool kpool exceeds u32"))?;
+            let candidates = seq_len / kpool;
+            let select_count = candidates.min(
+                u32::try_from(ctx.config.index_topk / ctx.config.index_kpool)
+                    .map_err(|_| anyhow::anyhow!("GLM IndexPool top-k exceeds u32"))?,
+            );
+            let tail_count = if ctx.config.index_kpool_always_select_tail {
+                seq_len % kpool
+            } else {
+                0
+            };
+            // q_full contains [index query | query-local index-head weights].
+            // Its former MLA-Q contents have been consumed by Q absorption.
+            if select_count > 0 {
+                prof!("glm_index_select", {
+                    ops::index_pool_select_weighted(
+                        ctx.gpu,
+                        self.glm_index_select_k,
+                        q_full,
+                        kv_cache
+                            .index_raw_pool_ptr(self.attn_layer_idx)
+                            .ok_or_else(|| anyhow::anyhow!("GLM IndexPool sidecar missing"))?,
+                        q_full.offset(ctx.config.index_n_heads * ctx.config.index_head_dim * 2),
+                        indexer.kpool_compress_ape.weight,
+                        meta.block_table,
+                        q_out,
+                        candidates,
+                        bs as u32,
+                        u32::try_from(
+                            kv_cache
+                                .index_raw_block_stride(self.attn_layer_idx)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("GLM IndexPool raw stride missing")
+                                })?,
+                        )
+                        .map_err(|_| anyhow::anyhow!("GLM IndexPool raw stride exceeds u32"))?,
+                        ctx.config.index_n_heads as u32,
+                        ctx.config.index_head_dim as u32,
+                        kpool,
+                        select_count,
+                        stream,
+                    )
+                })?;
+            }
+            let selected_tokens = select_count
+                .checked_mul(kpool)
+                .and_then(|n| n.checked_add(tail_count))
+                .ok_or_else(|| anyhow::anyhow!("GLM IndexPool selected-token width overflow"))?;
+            prof!("glm_index_expand", {
+                ops::index_pool_expand(
+                    ctx.gpu,
+                    self.glm_index_expand_k,
+                    q_out,
+                    q_full,
+                    select_count,
+                    kpool,
+                    seq_len,
+                    tail_count,
+                    stream,
+                )
+            })?;
+            prof!("glm_selected_mla", {
+                ops::selected_mla_bf16(
+                    ctx.gpu,
+                    self.glm_selected_mla_k,
+                    q_absorbed_buf,
+                    kv_cache.k_pool_ptr(self.attn_layer_idx),
+                    kv_cache.v_pool_ptr(self.attn_layer_idx),
+                    meta.block_table,
+                    q_full,
+                    attn_out,
+                    selected_tokens,
+                    bs as u32,
+                    kv_lora,
+                    nq,
+                    inv_sqrt_d,
+                    stream,
+                )
+            })?;
+        } else {
+            prof!("paged_attn", {
+                ops::paged_decode_attn_bf16(
+                    ctx.gpu,
+                    self.paged_decode_mla_k,
+                    q_absorbed_buf,
+                    kv_cache.k_pool_ptr(self.attn_layer_idx),
+                    kv_cache.v_pool_ptr(self.attn_layer_idx),
+                    attn_out,
+                    meta.block_table,
+                    meta.seq_len,
+                    meta.max_blocks_per_seq,
+                    1,
+                    nq,
+                    1,
+                    mla_cache_dim,
+                    bs as u32,
+                    inv_sqrt_d,
+                    nq * mla_cache_dim,
+                    0,
+                    stream,
+                )
+            })?;
+        }
 
         // Step 9: V extraction (batched GEMV)
         let v_extracted = ctx.buffers.norm_output();

@@ -104,7 +104,7 @@ impl Qwen3AttentionLayer {
         // DIAGNOSTIC: dump norms for L0 and L35 of Mistral
         let is_mistral_diag = ctx.profile
             && ctx.config.model_type == "mistral"
-            && (self.attn_layer_idx == 0 || self.attn_layer_idx == 35);
+            && (self.physical_layer_idx == 0 || self.attn_layer_idx == 35);
         if is_mistral_diag {
             diag_norm(
                 ctx.gpu,
@@ -136,7 +136,12 @@ impl Qwen3AttentionLayer {
                  got seq_len_start=0. Caller must fall back to per-stream for this chunk."
             );
         }
-        let attn_out = if seq_len_start == 0 && !allow_batched_first_chunk {
+        // GLM-5.3 DSA uses conventional no-RoPE MLA.  The cache-skip MLA
+        // path is specialized for the rope-bearing fused attention layout;
+        // route no-RoPE MLA through the paged chain, which assembles the
+        // latent cache with a zero-width rope segment safely.
+        let no_rope_mla = self.mla.as_ref().is_some_and(|mla| mla.rope == 0);
+        let attn_out = if seq_len_start == 0 && !allow_batched_first_chunk && !no_rope_mla {
             // Chunk 0 (or non-chunked): Flash Attention on contiguous Q/K/V.
             self.prefill_attention_with_cache_skip(
                 normed,
@@ -491,14 +496,14 @@ impl Qwen3AttentionLayer {
         let n = num_tokens as u32;
         let hc = self.hc.as_ref().unwrap();
         let hc_mult = hc.hc_mult as u32;
-        let is_first_layer = self.attn_layer_idx == 0;
-        let is_last_layer = self.attn_layer_idx + 1 == ctx.config.num_hidden_layers;
+        let is_first_layer = self.physical_layer_idx == 0;
+        let is_last_layer = self.physical_layer_idx + 1 == ctx.config.num_hidden_layers;
         let hc_streams = ctx.buffers.hc_streams();
         let post = ctx.buffers.hc_post();
         let comb = ctx.buffers.hc_comb();
         let diag_all =
             std::env::var("ATLAS_DIAG_V4_ALL_LAYERS").is_ok_and(|v| v == "1" || v == "true");
-        let diag_this = self.attn_layer_idx == 0 || diag_all;
+        let diag_this = self.physical_layer_idx == 0 || diag_all;
 
         if is_first_layer {
             ops::hc_expand(
@@ -678,6 +683,17 @@ impl Qwen3AttentionLayer {
                     hc.hc_eps,
                     stream,
                 )?;
+            } else if is_last_layer && hc.final_mean {
+                ops::hc_mean(
+                    ctx.gpu,
+                    self.hc_mean_k,
+                    hc_streams,
+                    hidden,
+                    n,
+                    h as u32,
+                    hc_mult,
+                    stream,
+                )?;
             }
             return Ok(());
         }
@@ -849,6 +865,17 @@ impl Qwen3AttentionLayer {
                     &format!("V4-prefill L{} hc_head", self.attn_layer_idx),
                 );
             }
+        } else if is_last_layer && hc.final_mean {
+            ops::hc_mean(
+                ctx.gpu,
+                self.hc_mean_k,
+                hc_streams,
+                hidden,
+                n,
+                h as u32,
+                hc_mult,
+                stream,
+            )?;
         } else if is_last_layer {
             tracing::warn!(
                 "V4-prefill L{}: hc_head SKIPPED (no head weights)",

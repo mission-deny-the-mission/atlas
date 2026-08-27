@@ -66,6 +66,10 @@ pub struct ModelConfig {
     /// 1D causal-conv kernel size on the SSM input (typically 3 or 4).
     #[serde(default = "default_conv_kernel")]
     pub linear_conv_kernel_dim: usize,
+    /// Kimi Delta Attention's explicit decay lower bound. `None` means this
+    /// architecture does not use the KDA safe-gate formulation.
+    #[serde(default)]
+    pub linear_gate_lower_bound: Option<f32>,
 
     // ── MoE ──
     #[serde(default)]
@@ -123,6 +127,10 @@ pub struct ModelConfig {
     pub bos_token_id: u32,
     #[serde(default, deserialize_with = "nullable_u32")]
     pub eos_token_id: u32,
+    /// All generation-stop IDs declared by the checkpoint. `eos_token_id`
+    /// remains the legacy primary ID for model code that accepts only one.
+    #[serde(default)]
+    pub eos_token_ids: Vec<u32>,
     #[serde(default)]
     pub tie_word_embeddings: bool,
     /// CLI override (`--lm-head-dtype`) for LM-head quantization, set at serve time
@@ -278,6 +286,18 @@ pub struct ModelConfig {
     /// Maximum compressed-history rows selected per query by the semantic indexer.
     #[serde(default)]
     pub index_topk: usize,
+    /// Number of source tokens compressed into one GLM IndexPool candidate.
+    #[serde(default)]
+    pub index_kpool: usize,
+    /// Whether IndexPool candidate compression is enabled by the checkpoint.
+    #[serde(default)]
+    pub index_kpool_compress: bool,
+    /// Whether GLM IndexPool always attends to the incomplete tail pool.
+    #[serde(default)]
+    pub index_kpool_always_select_tail: bool,
+    /// Per-attention-layer IndexPool execution mode (`full` or `shared`).
+    #[serde(default)]
+    pub indexer_types: Vec<String>,
     /// Number of hash-based attention layers (DeepSeek-V4 HCA). 0 = none.
     #[serde(default)]
     pub num_hash_layers: usize,
@@ -588,8 +608,8 @@ pub use parsers::{
     parse_peft_adapter_config, parse_quantization_config,
 };
 pub(crate) use parsers::{
-    parse_deepseek_v4, parse_gemma4_params, parse_laguna, parse_minimax_m2, parse_step3p7,
-    parse_vision_config,
+    parse_deepseek_v4, parse_gemma4_params, parse_glm5_next, parse_laguna, parse_minimax_m2,
+    parse_step3p7, parse_vision_config,
 };
 
 pub(crate) fn finalize_config(config: &mut ModelConfig, raw: &serde_json::Value) -> Result<()> {

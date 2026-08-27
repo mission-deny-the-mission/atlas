@@ -13,6 +13,13 @@ use atlas_core::config::ModelConfig;
 use crate::cli;
 
 pub(crate) fn load_eos_tokens(model_dir: &Path, config: &ModelConfig) -> Vec<u32> {
+    let config_eos = || {
+        if config.eos_token_ids.is_empty() {
+            vec![config.eos_token_id]
+        } else {
+            config.eos_token_ids.clone()
+        }
+    };
     let gen_config_path = model_dir.join("generation_config.json");
     if let Ok(gen_json) = std::fs::read_to_string(&gen_config_path) {
         if let Ok(gen_cfg) = serde_json::from_str::<serde_json::Value>(&gen_json) {
@@ -26,7 +33,7 @@ pub(crate) fn load_eos_tokens(model_dir: &Path, config: &ModelConfig) -> Vec<u32
                         tracing::info!("EOS tokens (from generation_config.json): {:?}", ids);
                         ids
                     } else {
-                        vec![config.eos_token_id]
+                        config_eos()
                     }
                 }
                 Some(serde_json::Value::Number(n)) => {
@@ -34,13 +41,14 @@ pub(crate) fn load_eos_tokens(model_dir: &Path, config: &ModelConfig) -> Vec<u32
                     tracing::info!("EOS token (from generation_config.json): {}", id);
                     vec![id]
                 }
-                _ => vec![config.eos_token_id],
+                _ => config_eos(),
             };
         }
-        return vec![config.eos_token_id];
+        return config_eos();
     }
-    tracing::info!("EOS token (from config.json): {}", config.eos_token_id);
-    vec![config.eos_token_id]
+    let ids = config_eos();
+    tracing::info!("EOS tokens (from config.json): {:?}", ids);
+    ids
 }
 
 pub(crate) struct SamplingDefaults {
@@ -385,7 +393,7 @@ pub(crate) fn resolve_tool_call_parser(
 mod sampling_defaults_tests {
     use clap::Parser;
 
-    use super::resolve_sampling_defaults;
+    use super::{load_eos_tokens, resolve_sampling_defaults};
     use crate::cli;
 
     /// A preset with values distinct from both the old hard-coded constants
@@ -479,5 +487,15 @@ mod sampling_defaults_tests {
         p.min_p = Some(0.0);
         let d = resolve_sampling_defaults(Some(&cfg), &args(), &p);
         assert_eq!(d.min_p, 0.31);
+    }
+
+    #[test]
+    fn config_eos_array_is_used_when_generation_config_is_absent() {
+        let mut config = atlas_core::config::ModelConfig::qwen3_next_80b_nvfp4();
+        config.eos_token_id = 10;
+        config.eos_token_ids = vec![10, 11, 12];
+        let path = std::path::Path::new("/tmp/atlas-no-generation-config");
+
+        assert_eq!(load_eos_tokens(path, &config), vec![10, 11, 12]);
     }
 }

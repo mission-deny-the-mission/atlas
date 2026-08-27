@@ -458,7 +458,7 @@ impl TransformerModel {
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
-            if layer.is_ssm_layer() {
+            if layer.uses_gdn_prefill_pipeline() {
                 // Phase 1: chunked projections → GDN input buffers.
                 for chunk_start in (0..proc_count).step_by(chunk_size) {
                     let chunk_len = chunk_size.min(proc_count - chunk_start);

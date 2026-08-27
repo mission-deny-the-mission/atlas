@@ -78,6 +78,12 @@ at conc=1; it trades against batch size and KV dtype (see §4).
 | **Gemma-4-31B** | `nvidia/Gemma-4-31B-IT-NVFP4` | 31B dense | NVFP4 | dense, sliding+full attn | ~9 | 16K | Vision; `gemma4` tool parser; registry-only (no per-model image) |
 | **Gemma-4-26B-A4B** | `bg-digitalservices/Gemma-4-26B-A4B-it-NVFP4A16` | 26B / 4B | **NVFP4A16** | MoE GeGLU | ~67 | 16K | 4-bit weights / 16-bit activations; registry-only |
 
+GLM-5.3-Flash (`zai-org/GLM-5.3-Flash`) is currently in runtime bring-up: its
+configuration, Kimi Delta Attention, MoE, mHC, and single-token decode-side
+IndexPool contracts are present, but sparse DSA prefill/batched decode, the
+vision tower, and NextN/MTP remain incomplete. It is not yet a deployable
+support-matrix entry.
+
 ### Large models (single-node tight, or scale out to EP=2 / EP=4)
 
 | Model | HuggingFace id | Params (total/active) | Quant | Topology | ~tok/s | Notes |

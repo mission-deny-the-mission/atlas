@@ -9,15 +9,38 @@
 
 #![allow(unused_imports, dead_code, clippy::too_many_arguments)]
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::super::super::types::TransformerModel;
+
+/// The current vision runtime is the Qwen ViT contract. GLM-5's Conv3D,
+/// 2D-RoPE, RMSNorm/QK-norm tower and gated merger require their own encoder;
+/// never accept images and silently omit them from a GLM text request.
+fn reject_unavailable_glm5_vision(
+    model_type: &str,
+    image_count: usize,
+    has_vision_encoder: bool,
+) -> Result<()> {
+    if model_type == "glm5_next" && image_count > 0 && !has_vision_encoder {
+        bail!(
+            "GLM-5.3-Flash image/video input is not supported by this Atlas build: \
+             the checkpoint's GLM vision tower is not compatible with the installed \
+             Qwen-style vision runtime. Text-only requests remain supported."
+        );
+    }
+    Ok(())
+}
 
 impl TransformerModel {
     pub(in crate::model) fn prepare_vision_embed_dispatch(
         &self,
         images: &[crate::VisionItem],
     ) -> Result<()> {
+        reject_unavailable_glm5_vision(
+            &self.config.model_type,
+            images.len(),
+            self.vision_encoder.is_some(),
+        )?;
         let ve = match &self.vision_encoder {
             Some(ve) => ve,
             None => return Ok(()),
@@ -86,6 +109,12 @@ impl TransformerModel {
         &self,
         per_request: &[Vec<crate::VisionItem>],
     ) -> Result<Vec<(usize, usize, usize, usize)>> {
+        let image_count = per_request.iter().map(Vec::len).sum();
+        reject_unavailable_glm5_vision(
+            &self.config.model_type,
+            image_count,
+            self.vision_encoder.is_some(),
+        )?;
         let ve = match &self.vision_encoder {
             Some(ve) => ve,
             None => return Ok(Vec::new()),
@@ -149,5 +178,25 @@ impl TransformerModel {
             total_merged
         );
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reject_unavailable_glm5_vision;
+
+    #[test]
+    fn glm_images_are_rejected_without_a_glm_encoder() {
+        let err = reject_unavailable_glm5_vision("glm5_next", 1, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("image/video input is not supported")
+        );
+        assert!(reject_unavailable_glm5_vision("glm5_next", 0, false).is_ok());
+    }
+
+    #[test]
+    fn existing_text_only_models_keep_legacy_dispatch_behavior() {
+        assert!(reject_unavailable_glm5_vision("qwen3_next", 1, false).is_ok());
     }
 }

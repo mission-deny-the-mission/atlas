@@ -10,6 +10,41 @@ use super::block_trace::BlockTrace;
 use super::{KvCacheConfig, KvCacheDtype, LayerPool, PagedKvCache};
 use crate::gpu::{DevicePtr, GpuBackend};
 
+fn index_pool_layout(
+    block_size: usize,
+    index_head_dim: usize,
+    index_heads: usize,
+    kpool: usize,
+) -> Result<(usize, usize, usize, usize)> {
+    if block_size == 0
+        || index_head_dim == 0
+        || index_heads == 0
+        || kpool == 0
+        || !block_size.is_multiple_of(kpool)
+    {
+        bail!("invalid GLM IndexPool geometry");
+    }
+    // GLM's pool gate is per index-key channel, not per index head. The
+    // index-head weights are query-local and must never be cached here.
+    let raw_channels = index_head_dim
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("GLM IndexPool raw channel overflow"))?;
+    let raw_stride = block_size
+        .checked_mul(raw_channels)
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("GLM IndexPool raw stride overflow"))?;
+    let slots = block_size / kpool;
+    let pooled_stride = slots
+        .checked_mul(index_head_dim)
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("GLM IndexPool pooled stride overflow"))?;
+    let gate_stride = slots
+        .checked_mul(index_heads)
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("GLM IndexPool gate stride overflow"))?;
+    Ok((raw_stride, pooled_stride, gate_stride, slots))
+}
+
 impl PagedKvCache {
     /// Allocate the KV cache pool on the GPU.
     pub fn new(config: KvCacheConfig, num_blocks: usize, gpu: &dyn GpuBackend) -> Result<Self> {
@@ -33,6 +68,13 @@ impl PagedKvCache {
                 k_block_stride: k_block_bytes,
                 v_block_stride: v_block_bytes,
                 dtype: config.dtype_for_layer(i),
+                index_raw_pool: None,
+                index_pool: None,
+                index_gate_pool: None,
+                index_raw_block_stride: 0,
+                index_block_stride: 0,
+                index_gate_block_stride: 0,
+                index_pool_slots: 0,
             });
         }
 
@@ -114,6 +156,30 @@ impl PagedKvCache {
                 layer.v_block_stride,
                 stream,
             )?;
+            if let Some(pool) = layer.index_raw_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_raw_block_stride),
+                    0,
+                    layer.index_raw_block_stride,
+                    stream,
+                )?;
+            }
+            if let Some(pool) = layer.index_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_block_stride),
+                    0,
+                    layer.index_block_stride,
+                    stream,
+                )?;
+            }
+            if let Some(pool) = layer.index_gate_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_gate_block_stride),
+                    0,
+                    layer.index_gate_block_stride,
+                    stream,
+                )?;
+            }
         }
         Ok(())
     }
@@ -147,6 +213,30 @@ impl PagedKvCache {
                 layer.v_block_stride,
                 stream,
             )?;
+            if let Some(pool) = layer.index_raw_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_raw_block_stride),
+                    0xFF,
+                    layer.index_raw_block_stride,
+                    stream,
+                )?;
+            }
+            if let Some(pool) = layer.index_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_block_stride),
+                    0xFF,
+                    layer.index_block_stride,
+                    stream,
+                )?;
+            }
+            if let Some(pool) = layer.index_gate_pool {
+                gpu.memset_async(
+                    pool.offset(block_idx as usize * layer.index_gate_block_stride),
+                    0xFF,
+                    layer.index_gate_block_stride,
+                    stream,
+                )?;
+            }
         }
         Ok(())
     }
@@ -438,6 +528,162 @@ impl PagedKvCache {
         self.layers[layer_idx].k_pool
     }
 
+    /// Allocate the block-aligned GLM IndexPool sidecar for one attention
+    /// layer. Raw entries contain K+gate channels; compressed entries contain
+    /// one pooled key per `kpool` source tokens.
+    pub fn enable_index_pool(
+        &mut self,
+        layer_idx: usize,
+        index_head_dim: usize,
+        index_heads: usize,
+        kpool: usize,
+        gpu: &dyn GpuBackend,
+    ) -> Result<()> {
+        let (raw_stride, pooled_stride, gate_stride, slots) =
+            index_pool_layout(self.config.block_size, index_head_dim, index_heads, kpool)?;
+        let layer = self
+            .layers
+            .get_mut(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("IndexPool layer index out of range"))?;
+        if layer.index_raw_pool.is_some() {
+            return Ok(());
+        }
+        layer.index_raw_pool = Some(gpu.alloc(self.num_blocks * raw_stride)?);
+        layer.index_pool = Some(gpu.alloc(self.num_blocks * pooled_stride)?);
+        layer.index_gate_pool = Some(gpu.alloc(self.num_blocks * gate_stride)?);
+        layer.index_raw_block_stride = raw_stride;
+        layer.index_block_stride = pooled_stride;
+        layer.index_gate_block_stride = gate_stride;
+        layer.index_pool_slots = slots;
+        Ok(())
+    }
+
+    pub fn index_raw_pool_ptr(&self, layer_idx: usize) -> Option<DevicePtr> {
+        self.layers.get(layer_idx)?.index_raw_pool
+    }
+
+    pub fn index_pool_ptr(&self, layer_idx: usize) -> Option<DevicePtr> {
+        self.layers.get(layer_idx)?.index_pool
+    }
+
+    pub fn index_gate_pool_ptr(&self, layer_idx: usize) -> Option<DevicePtr> {
+        self.layers.get(layer_idx)?.index_gate_pool
+    }
+
+    pub fn index_raw_block_stride(&self, layer_idx: usize) -> Option<usize> {
+        self.layers
+            .get(layer_idx)
+            .and_then(|layer| layer.index_raw_pool.map(|_| layer.index_raw_block_stride))
+    }
+
+    pub fn index_block_stride(&self, layer_idx: usize) -> Option<usize> {
+        self.layers
+            .get(layer_idx)
+            .and_then(|layer| layer.index_pool.map(|_| layer.index_block_stride))
+    }
+
+    pub fn index_gate_block_stride(&self, layer_idx: usize) -> Option<usize> {
+        self.layers
+            .get(layer_idx)
+            .and_then(|layer| layer.index_gate_pool.map(|_| layer.index_gate_block_stride))
+    }
+
+    /// Write one raw IndexPool token entry at a physical block/slot. The
+    /// caller supplies contiguous BF16 K+gate data (`2 * index_head_dim`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_index_raw(
+        &self,
+        layer_idx: usize,
+        block_idx: u32,
+        slot: usize,
+        raw: DevicePtr,
+        index_head_dim: usize,
+        index_heads: usize,
+        gpu: &dyn GpuBackend,
+        stream: u64,
+    ) -> Result<()> {
+        let layer = self
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("IndexPool layer index out of range"))?;
+        let pool = layer
+            .index_raw_pool
+            .ok_or_else(|| anyhow::anyhow!("IndexPool is not enabled for this layer"))?;
+        if block_idx as usize >= self.num_blocks
+            || slot >= self.config.block_size
+            || (index_head_dim + index_heads) * 2 > layer.index_raw_block_stride
+        {
+            bail!("IndexPool raw entry geometry is invalid");
+        }
+        let offset = block_idx as usize * layer.index_raw_block_stride
+            + slot * (index_head_dim + index_heads) * 2;
+        gpu.copy_d2d_async(
+            raw,
+            pool.offset(offset),
+            (index_head_dim + index_heads) * 2,
+            stream,
+        )
+    }
+
+    /// Write one compressed IndexPool candidate (BF16 `[index_head_dim]`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_index_pool(
+        &self,
+        layer_idx: usize,
+        block_idx: u32,
+        pool_slot: usize,
+        pooled: DevicePtr,
+        index_head_dim: usize,
+        gpu: &dyn GpuBackend,
+        stream: u64,
+    ) -> Result<()> {
+        let layer = self
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("IndexPool layer index out of range"))?;
+        let dst = layer
+            .index_pool
+            .ok_or_else(|| anyhow::anyhow!("IndexPool is not enabled for this layer"))?;
+        if block_idx as usize >= self.num_blocks
+            || pool_slot >= layer.index_pool_slots
+            || index_head_dim * 2 > layer.index_block_stride
+        {
+            bail!("IndexPool candidate geometry is invalid");
+        }
+        let offset = block_idx as usize * layer.index_block_stride + pool_slot * index_head_dim * 2;
+        gpu.copy_d2d_async(pooled, dst.offset(offset), index_head_dim * 2, stream)
+    }
+
+    /// Write one compressed IndexPool gate vector (BF16 `[index_heads]`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_index_gate_pool(
+        &self,
+        layer_idx: usize,
+        block_idx: u32,
+        pool_slot: usize,
+        gates: DevicePtr,
+        index_heads: usize,
+        gpu: &dyn GpuBackend,
+        stream: u64,
+    ) -> Result<()> {
+        let layer = self
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("IndexPool layer index out of range"))?;
+        let dst = layer
+            .index_gate_pool
+            .ok_or_else(|| anyhow::anyhow!("IndexPool gate sidecar is not enabled"))?;
+        if block_idx as usize >= self.num_blocks
+            || pool_slot >= layer.index_pool_slots
+            || index_heads * 2 > layer.index_gate_block_stride
+        {
+            bail!("IndexPool gate entry geometry is invalid");
+        }
+        let offset =
+            block_idx as usize * layer.index_gate_block_stride + pool_slot * index_heads * 2;
+        gpu.copy_d2d_async(gates, dst.offset(offset), index_heads * 2, stream)
+    }
+
     /// Get the full V cache pool pointer for a layer.
     pub fn v_pool_ptr(&self, layer_idx: usize) -> DevicePtr {
         self.layers[layer_idx].v_pool
@@ -579,5 +825,31 @@ impl PagedKvCache {
             bail!("KV cache block size is zero");
         }
         Ok(available_bytes / bytes_per_block)
+    }
+}
+
+#[cfg(test)]
+mod index_pool_tests {
+    use super::index_pool_layout;
+
+    #[test]
+    fn layout_matches_bf16_raw_and_pool_strides() {
+        let (raw, pooled, gates, slots) = index_pool_layout(32, 128, 32, 4).unwrap();
+        // GLM caches the 128-D normalized key and its 128-D per-channel
+        // compression gate. Index-head weights are query-local, not cache data.
+        assert_eq!(raw, 32 * (128 * 2) * 2);
+        assert_eq!(pooled, 8 * 128 * 2);
+        assert_eq!(gates, 8 * 32 * 2);
+        assert_eq!(slots, 8);
+    }
+
+    #[test]
+    fn layout_rejects_non_divisible_pool() {
+        assert!(index_pool_layout(31, 128, 32, 4).is_err());
+    }
+
+    #[test]
+    fn layout_rejects_channel_overflow() {
+        assert!(index_pool_layout(32, usize::MAX, 1, 4).is_err());
     }
 }
