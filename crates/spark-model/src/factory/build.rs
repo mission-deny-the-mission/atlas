@@ -531,7 +531,9 @@ pub fn build_model(
     }
     let high_speed_swap = kv_config.cache_blocks_per_seq.is_some();
     let mut kv_cache = PagedKvCache::new(kv_config, num_kv_blocks, gpu.as_ref())?;
-    if config.model_type == "glm5_next" {
+    let sparse_glm = config.model_type == "glm5_next"
+        && std::env::var_os("ATLAS_GLM_SPARSE_ATTENTION").is_some();
+    if sparse_glm {
         ensure!(
             !high_speed_swap,
             "GLM-5.3-Flash IndexPool does not support high-speed KV swap yet"

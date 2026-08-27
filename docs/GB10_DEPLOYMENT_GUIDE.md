@@ -82,7 +82,9 @@ GLM-5.3-Flash (`zai-org/GLM-5.3-Flash`) is currently in runtime bring-up: its
 configuration, Kimi Delta Attention, MoE, mHC, and single-token decode-side
 IndexPool contracts are present, but sparse DSA prefill/batched decode, the
 vision tower, and NextN/MTP remain incomplete. It is not yet a deployable
-support-matrix entry.
+support-matrix entry. Text-only prompt + generation can use the dense MLA
+correctness baseline (the default); `ATLAS_GLM_SPARSE_ATTENTION=1` is reserved
+for experiments with the incomplete sparse IndexPool path.
 
 ### Large models (single-node tight, or scale out to EP=2 / EP=4)
 

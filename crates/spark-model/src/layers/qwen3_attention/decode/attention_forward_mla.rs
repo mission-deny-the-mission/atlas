@@ -62,7 +62,13 @@ impl Qwen3AttentionLayer {
             .mla
             .as_ref()
             .expect("attention_forward_mla called without MLA config");
-        let glm_indexer = mla.glm_indexer.as_ref();
+        // Keep sparse IndexPool opt-in during text-only bring-up. Dense MLA
+        // is the correctness baseline and avoids consuming an IndexPool
+        // sidecar that dense prefill did not populate.
+        let glm_indexer = mla
+            .glm_indexer
+            .as_ref()
+            .filter(|_| std::env::var_os("ATLAS_GLM_SPARSE_ATTENTION").is_some());
         let meta = ctx
             .attn_metadata
             .expect("MLA decode requires pre-uploaded metadata");

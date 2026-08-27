@@ -57,9 +57,12 @@ impl Qwen3AttentionLayer {
             .mla
             .as_ref()
             .expect("prefill_attention_paged_mla called without MLA config");
-        if mla.glm_indexer.is_some() {
+        // GLM DSA prefill is not available yet. Dense MLA is the safe
+        // text-only baseline; sparse decode is opt-in until sparse prefill
+        // can populate the sidecar for every prompt token.
+        if mla.glm_indexer.is_some() && std::env::var_os("ATLAS_GLM_SPARSE_ATTENTION").is_some() {
             anyhow::bail!(
-                "GLM-5.3 DSA sparse IndexPool prefill is not implemented; refusing incorrect dense MLA prefill"
+                "GLM-5.3 DSA sparse IndexPool prefill is not implemented; unset ATLAS_GLM_SPARSE_ATTENTION for the dense text-only fallback"
             );
         }
 
